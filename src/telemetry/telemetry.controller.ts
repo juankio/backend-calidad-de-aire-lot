@@ -26,7 +26,7 @@ export class TelemetryController {
     @Body(new ZodValidationPipe(TelemetryIngestSchema))
     data: TelemetryIngestDto,
   ) {
-    const result = this.telemetryService.processAndBroadcast(data);
+    const result = this.telemetryService.processAndBroadcast(data, 'hardware');
     return {
       data: result,
       message: 'Telemetría ingestada y procesada correctamente',

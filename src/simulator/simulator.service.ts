@@ -32,7 +32,7 @@ export class SimulatorService implements OnModuleDestroy {
           raw_adc: Math.round(this.simPpm * 1.5),
         };
 
-        this.telemetryService.processAndBroadcast(sample);
+        this.telemetryService.processAndBroadcast(sample, 'simulator');
       }, 2000);
 
       return {

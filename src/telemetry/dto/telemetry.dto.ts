@@ -39,4 +39,5 @@ export interface EnrichedTelemetryPayload extends TelemetryIngestDto {
   risk_status: RiskStatus;
   session_id: string | null;
   timestamp_iso: string;
+  source: 'hardware' | 'simulator';
 }

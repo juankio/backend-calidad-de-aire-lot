@@ -267,8 +267,19 @@ describe('Air Guardian IoT - NestJS Backend HTTP & WebSocket Suite', () => {
     }
   });
 
-  it('POST /api/simulate/toggle activa y desactiva el simulador', async () => {
-    // Activar
+  it('POST /api/simulate/toggle activa y desactiva el simulador y GET /api/simulate/status reporta estado', async () => {
+    // 1. Estado inicial
+    const resStatusInit = await fetch(`${BASE_URL}/api/simulate/status`);
+    expect(resStatusInit.status).toBe(200);
+    const jsonStatusInit = (await resStatusInit.json()) as any;
+    expect(jsonStatusInit).toEqual({
+      success: true,
+      data: { running: false },
+      message: 'Estado del simulador',
+      error: null,
+    });
+
+    // 2. Activar
     const resOn = await fetch(`${BASE_URL}/api/simulate/toggle`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -279,7 +290,18 @@ describe('Air Guardian IoT - NestJS Backend HTTP & WebSocket Suite', () => {
     expect(jsonOn.success).toBe(true);
     expect(jsonOn.data.running).toBe(true);
 
-    // Desactivar
+    // 3. Estado corriendo
+    const resStatusRunning = await fetch(`${BASE_URL}/api/simulate/status`);
+    expect(resStatusRunning.status).toBe(200);
+    const jsonStatusRunning = (await resStatusRunning.json()) as any;
+    expect(jsonStatusRunning).toEqual({
+      success: true,
+      data: { running: true },
+      message: 'Estado del simulador',
+      error: null,
+    });
+
+    // 4. Desactivar
     const resOff = await fetch(`${BASE_URL}/api/simulate/toggle`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -289,9 +311,20 @@ describe('Air Guardian IoT - NestJS Backend HTTP & WebSocket Suite', () => {
     const jsonOff = (await resOff.json()) as any;
     expect(jsonOff.success).toBe(true);
     expect(jsonOff.data.running).toBe(false);
+
+    // 5. Estado detenido
+    const resStatusFinal = await fetch(`${BASE_URL}/api/simulate/status`);
+    expect(resStatusFinal.status).toBe(200);
+    const jsonStatusFinal = (await resStatusFinal.json()) as any;
+    expect(jsonStatusFinal).toEqual({
+      success: true,
+      data: { running: false },
+      message: 'Estado del simulador',
+      error: null,
+    });
   });
 
-  it('WebSocket recibe CONNECTION_ACK y TELEMETRY_UPDATE en ingesta', async () => {
+  it('WebSocket recibe CONNECTION_ACK y TELEMETRY_UPDATE con source de hardware y simulator', async () => {
     const ws = new WebSocket(`ws://localhost:${PORT}`);
 
     const ackPromise = new Promise<any>((resolve) => {
@@ -307,14 +340,16 @@ describe('Air Guardian IoT - NestJS Backend HTTP & WebSocket Suite', () => {
     expect(ackMessage.type).toBe('CONNECTION_ACK');
     expect(ackMessage.message).toBe('Conectado al stream de telemetría IoT');
 
-    // Ahora enviar telemetría por HTTP y verificar broadcast en WebSocket
+    // Ahora enviar telemetría por HTTP y verificar broadcast en WebSocket con source 'hardware'
     const updatePromise = new Promise<any>((resolve) => {
-      ws.on('message', (data) => {
+      const listener = (data: any) => {
         const parsed = JSON.parse(data.toString());
-        if (parsed.type === 'TELEMETRY_UPDATE') {
+        if (parsed.type === 'TELEMETRY_UPDATE' && parsed.payload?.device_id === 'ws-test-device') {
+          ws.off('message', listener);
           resolve(parsed);
         }
-      });
+      };
+      ws.on('message', listener);
     });
 
     const sample = {
@@ -328,16 +363,19 @@ describe('Air Guardian IoT - NestJS Backend HTTP & WebSocket Suite', () => {
       raw_adc: 800,
     };
 
-    await fetch(`${BASE_URL}/api/telemetry/ingest`, {
+    const ingestRes = await fetch(`${BASE_URL}/api/telemetry/ingest`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(sample),
     });
+    const ingestJson = (await ingestRes.json()) as any;
+    expect(ingestJson.data.source).toBe('hardware');
 
     const updateMessage = await updatePromise;
     expect(updateMessage.type).toBe('TELEMETRY_UPDATE');
     expect(updateMessage.payload.device_id).toBe('ws-test-device');
     expect(updateMessage.payload.ppm).toBe(555);
+    expect(updateMessage.payload.source).toBe('hardware');
 
     ws.close();
   });

@@ -21,7 +21,7 @@ export class TelemetryService {
   /**
    * Procesa la telemetría IoT entrante, almacena en Bronze/Silver y emite vía WebSocket
    */
-  processAndBroadcast(data: TelemetryIngestDto): EnrichedTelemetryPayload {
+  processAndBroadcast(data: TelemetryIngestDto, source: 'hardware' | 'simulator' = 'hardware'): EnrichedTelemetryPayload {
     const prediction = this.processTelemetry(data);
 
     const broadcastData: EnrichedTelemetryPayload = {
@@ -31,6 +31,7 @@ export class TelemetryService {
       risk_status: prediction.risk_status,
       session_id: prediction.session_id,
       timestamp_iso: new Date(data.timestamp).toISOString(),
+      source,
     };
 
     this.telemetryGateway.broadcastTelemetry(broadcastData);

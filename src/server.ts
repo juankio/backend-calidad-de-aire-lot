@@ -69,7 +69,8 @@ app.post("/api/telemetry/ingest", (req: Request, res: Response) => {
       delta_ppm_1m: prediction.delta_ppm_1m,
       risk_status: prediction.risk_status,
       session_id: prediction.session_id,
-      timestamp_iso: new Date(data.timestamp).toISOString()
+      timestamp_iso: new Date(data.timestamp).toISOString(),
+      source: "hardware"
     };
 
     broadcastTelemetry({ type: "TELEMETRY_UPDATE", payload: broadcastData });
@@ -201,6 +202,14 @@ let simulationInterval: any = null;
 let simPpm = 410;
 let simTrend = 1;
 
+app.get("/api/simulate/status", (_req: Request, res: Response) => {
+  try {
+    return res.json(formatResponse(true, { running: !!simulationInterval }, "Estado del simulador"));
+  } catch (error: any) {
+    return res.status(500).json(formatResponse(false, null, "Error al consultar estado del simulador", error?.message || "Internal error"));
+  }
+});
+
 app.post("/api/simulate/toggle", (req: Request, res: Response) => {
   try {
     const enable = req.body.enable ?? true;
@@ -232,7 +241,8 @@ app.post("/api/simulate/toggle", (req: Request, res: Response) => {
             delta_ppm_1m: prediction.delta_ppm_1m,
             risk_status: prediction.risk_status,
             session_id: prediction.session_id,
-            timestamp_iso: new Date(sample.timestamp).toISOString()
+            timestamp_iso: new Date(sample.timestamp).toISOString(),
+            source: "simulator"
           }
         });
       }, 2000);
