@@ -1,0 +1,47 @@
+# Dependencies (bun install)
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Build & Dist Output
+dist/
+out/
+*.tgz
+*.tsbuildinfo
+
+# SQLite Data Lakehouse & Temp DB Files
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Code Coverage & Testing
+coverage/
+*.lcov
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+bun.lockb
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Caches
+.eslintcache
+.cache/
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
