@@ -12,6 +12,7 @@ export interface StandardSuccessResponse<T> {
   data: T | null;
   message: string;
   error: null;
+  [key: string]: any;
 }
 
 @Injectable()
@@ -33,9 +34,10 @@ export class TransformInterceptor<T>
         ) {
           return {
             success: true,
-            data: res.data !== undefined ? res.data : null,
             message: res.message || 'Operación realizada con éxito',
             error: null,
+            ...res,
+            data: res.data !== undefined ? res.data : null,
           };
         }
 

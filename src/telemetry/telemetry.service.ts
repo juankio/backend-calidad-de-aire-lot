@@ -6,22 +6,83 @@ import type {
   QueryHistoryDto,
   PredictionResult,
   EnrichedTelemetryPayload,
+  BatchIngestResult,
   RiskStatus,
 } from './dto/telemetry.dto';
 
 @Injectable()
 export class TelemetryService {
   private readonly logger = new Logger(TelemetryService.name);
+  private pendingCommands: Record<string, { view_mode?: 'FACE' | 'HUD'; emotion?: string; timestamp: number }> = {};
 
   constructor(
     private readonly databaseService: DatabaseService,
     private readonly telemetryGateway: TelemetryGateway,
-  ) {}
+  ) {
+    // Vincular receptor de lotes por WebSocket de forma desacoplada
+    this.telemetryGateway.setBatchHandler((samples) =>
+      this.processTelemetryBatch(samples, 'hardware'),
+    );
+  }
+
+  /**
+   * Encola un comando pendiente para ser recogido por el ESP32 en su siguiente ingest
+   */
+  queueCommand(deviceId: string, command: { view_mode?: 'FACE' | 'HUD'; emotion?: string }) {
+    const existing = this.pendingCommands[deviceId] || { timestamp: Date.now() };
+    this.pendingCommands[deviceId] = {
+      ...existing,
+      ...command,
+      timestamp: Date.now(),
+    };
+    this.logger.log(`⚡ Comando encolado para [${deviceId}]: ${JSON.stringify(command)}`);
+    return this.pendingCommands[deviceId];
+  }
+
+  /**
+   * Extrae y elimina el comando pendiente para un dispositivo (consumo atómico)
+   */
+  consumeCommand(deviceId: string) {
+    const pending = this.pendingCommands[deviceId];
+    if (pending) {
+      delete this.pendingCommands[deviceId];
+      return pending;
+    }
+    return null;
+  }
+
+  /**
+   * Difunde un comando inmediatamente por WebSocket para sincronización instantánea de la UI
+   */
+  broadcastCommand(deviceId: string, command: { view_mode?: 'FACE' | 'HUD'; emotion?: string }) {
+    const live = this.getLiveTelemetry();
+    this.telemetryGateway.broadcastTelemetry({
+      device_id: deviceId,
+      timestamp: Date.now(),
+      timestamp_iso: new Date().toISOString(),
+      ppm: live?.ppm ?? 420,
+      co_ppm: live?.co_ppm ?? 2.1,
+      temperature: live?.temperature ?? 24.5,
+      humidity: live?.humidity ?? 55,
+      delta_ppm_1m: live?.delta_ppm_1m ?? 0,
+      predicted_ppm_15m: live?.predicted_ppm_15m ?? 420,
+      risk_status: live?.risk_status ?? 'OPTIMAL',
+      source: 'hardware',
+      view_mode: command.view_mode,
+      device_emotion: command.emotion,
+      emotion: command.emotion,
+    });
+  }
 
   /**
    * Procesa la telemetría IoT entrante, almacena en Bronze/Silver y emite vía WebSocket
    */
   processAndBroadcast(data: TelemetryIngestDto, source: 'hardware' | 'simulator' = 'hardware'): EnrichedTelemetryPayload {
+    // Si el timestamp del ESP32 es relativo a millis() (< año 2000), sincronizar con hora de llegada
+    if (data.timestamp < 946684800000) {
+      data.timestamp = Date.now();
+    }
+
     const prediction = this.processTelemetry(data);
 
     const broadcastData: EnrichedTelemetryPayload = {
@@ -32,6 +93,15 @@ export class TelemetryService {
       session_id: prediction.session_id,
       timestamp_iso: new Date(data.timestamp).toISOString(),
       source,
+      device_emotion: data.emotion,
+      view_mode: data.view_mode,
+      raw_adc7: data.raw_adc7,
+      mpu_connected: data.mpu_connected,
+      eye_x: data.eye_x,
+      eye_y: data.eye_y,
+      free_heap: data.free_heap,
+      uptime_s: data.uptime_s,
+      offline_pending: data.offline_pending,
     };
 
     this.telemetryGateway.broadcastTelemetry(broadcastData);
@@ -42,6 +112,11 @@ export class TelemetryService {
    * Lógica matemática y analítica del motor predictivo
    */
   processTelemetry(data: TelemetryIngestDto): PredictionResult {
+    // Si el timestamp es relativo a millis() del ESP32 (< año 2000), mapear a hora real del servidor
+    if (data.timestamp < 946684800000) {
+      data.timestamp = Date.now();
+    }
+
     // 1. Guardar en Capa Bronze (Inmutable Data Lake)
     this.databaseService.run(
       `INSERT INTO bronze_telemetry (device_id, timestamp, ppm, co_ppm, temperature, humidity, delta_ppm, raw_adc)
@@ -71,14 +146,14 @@ export class TelemetryService {
 
     const sessionId = activeSession ? activeSession.id : null;
 
-    // 3. Obtener últimas 10 muestras (ventana deslizante) para calcular inercia y derivada temporal
+    // 3. Obtener últimas 10 muestras (ventana deslizante) hasta el timestamp de la muestra actual
     const recentRows = this.databaseService
       .query(
         `SELECT ppm, timestamp FROM bronze_telemetry 
-         WHERE device_id = ? 
+         WHERE device_id = ? AND timestamp <= ?
          ORDER BY timestamp DESC LIMIT 10`,
       )
-      .all(data.device_id) as Array<{ ppm: number; timestamp: number }>;
+      .all(data.device_id, data.timestamp) as Array<{ ppm: number; timestamp: number }>;
 
     let delta1m = data.delta_ppm;
     if (recentRows.length >= 2) {
@@ -142,11 +217,171 @@ export class TelemetryService {
   }
 
   /**
+   * Ingesta y procesa un lote de telemetría (Offline Flush) de forma atómica y ordenada cronológicamente.
+   * Preserva el timestamp original de cada muestra y calcula la derivada temporal sin sesgos.
+   */
+  processTelemetryBatch(
+    samples: TelemetryIngestDto[],
+    source: 'hardware' | 'simulator' = 'hardware',
+  ): BatchIngestResult {
+    if (!samples || samples.length === 0) {
+      return {
+        total_received: 0,
+        total_processed: 0,
+        first_timestamp: null,
+        last_timestamp: null,
+        device_id: 'air-guardian-01',
+        samples: [],
+      };
+    }
+
+    // 1. Ordenar cronológicamente ascendente para cálculo estricto de derivada temporal
+    const sorted = [...samples].sort((a, b) => a.timestamp - b.timestamp);
+    const db = this.databaseService.getDb();
+
+    const insertBronze = db.prepare(`
+      INSERT INTO bronze_telemetry (device_id, timestamp, ppm, co_ppm, temperature, humidity, delta_ppm, raw_adc)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const selectSession = db.prepare(`
+      SELECT id FROM measurement_sessions 
+      WHERE device_id = ? 
+        AND start_time <= ? 
+        AND (end_time IS NULL OR end_time >= ?)
+      ORDER BY start_time DESC LIMIT 1
+    `);
+
+    const selectRecent = db.prepare(`
+      SELECT ppm, timestamp FROM bronze_telemetry 
+      WHERE device_id = ? AND timestamp <= ?
+      ORDER BY timestamp DESC LIMIT 10
+    `);
+
+    const insertSilver = db.prepare(`
+      INSERT INTO silver_telemetry (device_id, session_id, timestamp, ppm, co_ppm, temperature, humidity, delta_ppm_1m, predicted_ppm_15m, risk_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const enrichedList: EnrichedTelemetryPayload[] = [];
+    const attenuation = 0.65;
+
+    const batchTx = db.transaction(() => {
+      for (const item of sorted) {
+        // A. Insertar en Bronze
+        insertBronze.run(
+          item.device_id,
+          item.timestamp,
+          item.ppm,
+          item.co_ppm,
+          item.temperature,
+          item.humidity,
+          item.delta_ppm,
+          item.raw_adc,
+        );
+
+        // B. Asociar sesión temporal
+        const activeSession = selectSession.get(
+          item.device_id,
+          item.timestamp,
+          item.timestamp,
+        ) as { id: string } | null;
+        const sessionId = activeSession ? activeSession.id : null;
+
+        // C. Ventana temporal hasta este punto
+        const recentRows = selectRecent.all(
+          item.device_id,
+          item.timestamp,
+        ) as Array<{ ppm: number; timestamp: number }>;
+
+        let delta1m = item.delta_ppm;
+        if (recentRows.length >= 2) {
+          const newest = recentRows[0];
+          const oldest = recentRows[recentRows.length - 1];
+          if (newest && oldest && newest.timestamp > oldest.timestamp) {
+            const timeDiffMin = (newest.timestamp - oldest.timestamp) / 60000.0;
+            if (timeDiffMin >= 5.0 / 60.0) {
+              const rawDelta = (newest.ppm - oldest.ppm) / timeDiffMin;
+              delta1m = Math.max(-500, Math.min(500, Math.round(rawDelta * 10) / 10));
+            }
+          }
+        }
+
+        // D. Predicción a 15 min y clasificación
+        const rawPred = Math.round(item.ppm + delta1m * 15.0 * attenuation);
+        const predicted15m = Math.max(380, Math.min(10000, rawPred));
+
+        let riskStatus: RiskStatus = 'OPTIMAL';
+        if (item.co_ppm > 25 || item.ppm > 1400 || predicted15m > 1600) {
+          riskStatus = 'CRITICAL';
+        } else if (delta1m > 35 || predicted15m > 850 || item.ppm > 800) {
+          riskStatus = 'WARNING_PREDICTIVE';
+        } else if (delta1m < -30 && item.ppm < 700) {
+          riskStatus = 'RECOVERY';
+        }
+
+        // E. Insertar en Silver
+        insertSilver.run(
+          item.device_id,
+          sessionId,
+          item.timestamp,
+          item.ppm,
+          item.co_ppm,
+          item.temperature,
+          item.humidity,
+          delta1m,
+          predicted15m,
+          riskStatus,
+        );
+
+        enrichedList.push({
+          ...item,
+          predicted_ppm_15m: predicted15m,
+          delta_ppm_1m: delta1m,
+          risk_status: riskStatus,
+          session_id: sessionId,
+          timestamp_iso: new Date(item.timestamp).toISOString(),
+          source,
+          device_emotion: item.emotion,
+          view_mode: item.view_mode,
+          raw_adc7: item.raw_adc7,
+          mpu_connected: item.mpu_connected,
+          eye_x: item.eye_x,
+          eye_y: item.eye_y,
+          free_heap: item.free_heap,
+          uptime_s: item.uptime_s,
+          offline_pending: item.offline_pending,
+        });
+      }
+    });
+
+    batchTx();
+
+    this.logger.log(`📥 Lote procesado: ${enrichedList.length} muestras persistidas en Bronze/Silver.`);
+
+    // F. Difundir en WebSocket tanto el lote como la muestra más reciente
+    this.telemetryGateway.broadcastBatch(enrichedList);
+    if (enrichedList.length > 0) {
+      const latest = enrichedList[enrichedList.length - 1];
+      this.telemetryGateway.broadcastTelemetry(latest);
+    }
+
+    return {
+      total_received: samples.length,
+      total_processed: enrichedList.length,
+      first_timestamp: enrichedList.length ? enrichedList[0].timestamp : null,
+      last_timestamp: enrichedList.length ? enrichedList[enrichedList.length - 1].timestamp : null,
+      device_id: sorted[0]?.device_id || 'air-guardian-01',
+      samples: enrichedList,
+    };
+  }
+
+  /**
    * Obtiene la última lectura en vivo almacenada en Silver
    */
   getLiveTelemetry() {
     return this.databaseService
-      .query(`SELECT * FROM silver_telemetry ORDER BY timestamp DESC LIMIT 1`)
+      .query(`SELECT * FROM silver_telemetry ORDER BY id DESC LIMIT 1`)
       .get() as Record<string, any> | null;
   }
 

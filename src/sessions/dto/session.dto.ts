@@ -18,3 +18,15 @@ export const CreateSessionSchema = z
   });
 
 export type CreateSessionDto = z.infer<typeof CreateSessionSchema>;
+
+// Validación para actualización de sesiones
+export const UpdateSessionSchema = z.object({
+  name: z.string().min(2).max(120).optional(),
+  description: z.string().max(500).optional(),
+  latitude: z.number().min(-90).max(90).optional(),
+  longitude: z.number().min(-180).max(180).optional(),
+  radius_meters: z.number().positive().max(50000).optional(),
+  end_time: z.number().int().positive().nullable().optional(),
+});
+
+export type UpdateSessionDto = z.infer<typeof UpdateSessionSchema>;

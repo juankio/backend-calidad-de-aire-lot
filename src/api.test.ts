@@ -7,7 +7,12 @@ import { WebSocket } from 'ws';
 import { AppModule } from './app.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
-import { TelemetryIngestSchema, CreateSessionSchema } from './schemas';
+import {
+  TelemetryIngestSchema,
+  SingleBatchSampleSchema,
+  TelemetryBatchSchema,
+  CreateSessionSchema,
+} from './schemas';
 import { PredictiveEngine } from './predictive_engine';
 import { AnalyticsService } from './analytics/analytics.service';
 
@@ -25,6 +30,50 @@ describe('Air Guardian IoT - Schemas & Validation', () => {
     };
     const res = TelemetryIngestSchema.safeParse(valid);
     expect(res.success).toBe(true);
+  });
+
+  it('acepta campos opcionales de hardware y diagnóstico en TelemetryIngestSchema y SingleBatchSampleSchema', () => {
+    const extendedPayload = {
+      device_id: 'air-guardian-01',
+      timestamp: Date.now(),
+      ppm: 420,
+      co_ppm: 2.5,
+      temperature: 24.0,
+      humidity: 55.0,
+      delta_ppm: 0,
+      raw_adc: 630,
+      raw_adc7: 512,
+      mpu_connected: true,
+      eye_x: 12,
+      eye_y: -4,
+      free_heap: 184320,
+      uptime_s: 3600,
+      offline_pending: 0,
+    };
+
+    const resIngest = TelemetryIngestSchema.safeParse(extendedPayload);
+    expect(resIngest.success).toBe(true);
+    if (resIngest.success) {
+      expect(resIngest.data.raw_adc7).toBe(512);
+      expect(resIngest.data.mpu_connected).toBe(true);
+      expect(resIngest.data.eye_x).toBe(12);
+      expect(resIngest.data.eye_y).toBe(-4);
+      expect(resIngest.data.free_heap).toBe(184320);
+      expect(resIngest.data.uptime_s).toBe(3600);
+      expect(resIngest.data.offline_pending).toBe(0);
+    }
+
+    const resBatchSample = SingleBatchSampleSchema.safeParse(extendedPayload);
+    expect(resBatchSample.success).toBe(true);
+    if (resBatchSample.success) {
+      expect(resBatchSample.data.raw_adc7).toBe(512);
+      expect(resBatchSample.data.mpu_connected).toBe(true);
+      expect(resBatchSample.data.eye_x).toBe(12);
+      expect(resBatchSample.data.eye_y).toBe(-4);
+      expect(resBatchSample.data.free_heap).toBe(184320);
+      expect(resBatchSample.data.uptime_s).toBe(3600);
+      expect(resBatchSample.data.offline_pending).toBe(0);
+    }
   });
 
   it('rechaza telemetría con valores fuera de rango físico', () => {
@@ -64,6 +113,61 @@ describe('Air Guardian IoT - Schemas & Validation', () => {
     };
     const res = CreateSessionSchema.safeParse(invalidSession);
     expect(res.success).toBe(false);
+  });
+
+  it('valida lotes batch de telemetría como array y como objeto con samples', () => {
+    const rawSamples = [
+      {
+        device_id: 'air-guardian-01',
+        timestamp: 1700000000000,
+        ppm: 430,
+        co_ppm: 1.2,
+        temperature: 24,
+        humidity: 50,
+        delta_ppm: 0,
+        raw_adc: 645,
+      },
+      {
+        device_id: 'air-guardian-01',
+        timestamp: 1700000060000,
+        ppm: 440,
+        co_ppm: 1.3,
+        temperature: 24.1,
+        humidity: 50.5,
+        delta_ppm: 10,
+        raw_adc: 660,
+      },
+    ];
+
+    // 1. Como array directo
+    const resArray = TelemetryBatchSchema.safeParse(rawSamples);
+    expect(resArray.success).toBe(true);
+    if (resArray.success) {
+      expect(resArray.data.length).toBe(2);
+    }
+
+    // 2. Como objeto con samples y device_id común
+    const resObj = TelemetryBatchSchema.safeParse({
+      device_id: 'esp32-offline-buffer',
+      samples: [
+        {
+          timestamp: 1700000120000,
+          ppm: 450,
+          co_ppm: 1.5,
+          temperature: 24.2,
+          humidity: 51,
+          raw_adc: 675,
+        },
+      ],
+    });
+    expect(resObj.success).toBe(true);
+    if (resObj.success) {
+      expect(resObj.data[0].device_id).toBe('esp32-offline-buffer');
+    }
+
+    // 3. Rechaza lote vacío
+    const emptyRes = TelemetryBatchSchema.safeParse([]);
+    expect(emptyRes.success).toBe(false);
   });
 });
 
@@ -166,8 +270,8 @@ describe('Air Guardian IoT - NestJS Backend HTTP & WebSocket Suite', () => {
     const newSession = {
       name: `Campaña Test ${Date.now()}`,
       description: 'Prueba automatizada de QA',
-      latitude: 4.6097,
-      longitude: -74.0817,
+      latitude: 4.1450,
+      longitude: -73.6280,
       radius_meters: 80,
       start_time: Date.now(),
       device_id: 'air-guardian-01',
@@ -185,6 +289,27 @@ describe('Air Guardian IoT - NestJS Backend HTTP & WebSocket Suite', () => {
     expect(json.data.name).toBe(newSession.name);
     expect(json.data.latitude).toBe(newSession.latitude);
     expect(json.error).toBe(null);
+
+    const createdId = json.data.id;
+
+    // PATCH /api/sessions/:id
+    const patchRes = await fetch(`${BASE_URL}/api/sessions/${createdId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Campaña Editada Test', radius_meters: 100 }),
+    });
+    expect(patchRes.status).toBe(200);
+    const patchJson = (await patchRes.json()) as any;
+    expect(patchJson.success).toBe(true);
+    expect(patchJson.data.name).toBe('Campaña Editada Test');
+
+    // DELETE /api/sessions/:id (Limpieza para no contaminar la base de datos)
+    const deleteRes = await fetch(`${BASE_URL}/api/sessions/${createdId}`, {
+      method: 'DELETE',
+    });
+    expect(deleteRes.status).toBe(200);
+    const deleteJson = (await deleteRes.json()) as any;
+    expect(deleteJson.success).toBe(true);
   });
 
   it('POST /api/telemetry/ingest ingesta telemetría y calcula predicción', async () => {
@@ -377,7 +502,7 @@ describe('Air Guardian IoT - NestJS Backend HTTP & WebSocket Suite', () => {
     expect(updateMessage.payload.ppm).toBe(555);
     expect(updateMessage.payload.source).toBe('hardware');
 
-    ws.close();
+    try { ws.terminate(); } catch (_) {}
   });
 
   // =========================================================================
@@ -550,5 +675,478 @@ describe('Air Guardian IoT - NestJS Backend HTTP & WebSocket Suite', () => {
     expect(json.success).toBe(false);
     expect(json.data).toBe(null);
     expect(json.error).toBeDefined();
+  });
+
+  // =========================================================================
+  // BATCH INGESTION (OFFLINE FLUSH) & LOCAL MODE SEEDING SUITE
+  // =========================================================================
+
+  it('POST /api/telemetry/batch procesa lote preservando timestamps originales y calculando capa Silver', async () => {
+    const baseTime = Date.now() - 300000; // 5 minutos en el pasado (offline)
+    const batchPayload = [
+      {
+        device_id: 'esp32-offline-01',
+        timestamp: baseTime,
+        ppm: 420,
+        co_ppm: 1.5,
+        temperature: 23.5,
+        humidity: 50.0,
+        delta_ppm: 0,
+        raw_adc: 630,
+      },
+      {
+        device_id: 'esp32-offline-01',
+        timestamp: baseTime + 60000,
+        ppm: 460,
+        co_ppm: 2.0,
+        temperature: 23.8,
+        humidity: 51.0,
+        delta_ppm: 0,
+        raw_adc: 690,
+      },
+      {
+        device_id: 'esp32-offline-01',
+        timestamp: baseTime + 120000,
+        ppm: 520,
+        co_ppm: 2.8,
+        temperature: 24.1,
+        humidity: 52.0,
+        delta_ppm: 0,
+        raw_adc: 780,
+      },
+    ];
+
+    const res = await fetch(`${BASE_URL}/api/telemetry/batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(batchPayload),
+    });
+
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as any;
+    expect(json.success).toBe(true);
+    expect(json.error).toBe(null);
+    expect(json.data.total_received).toBe(3);
+    expect(json.data.total_processed).toBe(3);
+    expect(json.data.first_timestamp).toBe(baseTime);
+    expect(json.data.last_timestamp).toBe(baseTime + 120000);
+    expect(Array.isArray(json.data.samples)).toBe(true);
+    expect(json.data.samples.length).toBe(3);
+
+    // Verificar preservación de timestamp exacto y cálculo de capa Silver
+    expect(json.data.samples[0].timestamp).toBe(baseTime);
+    expect(json.data.samples[1].timestamp).toBe(baseTime + 60000);
+    expect(json.data.samples[2].timestamp).toBe(baseTime + 120000);
+
+    // Las muestras deben tener cálculo predictivo y estado de riesgo
+    for (const sample of json.data.samples) {
+      expect(sample).toHaveProperty('predicted_ppm_15m');
+      expect(sample).toHaveProperty('risk_status');
+      expect(sample).toHaveProperty('delta_ppm_1m');
+      expect(sample.source).toBe('hardware');
+    }
+
+    // Comprobar que en el histórico de la base de datos se persistieron con su timestamp original
+    const historyRes = await fetch(
+      `${BASE_URL}/api/telemetry/history?device_id=esp32-offline-01&limit=10`,
+    );
+    expect(historyRes.status).toBe(200);
+    const historyJson = (await historyRes.json()) as any;
+    expect(historyJson.success).toBe(true);
+    const found = historyJson.data.filter((h: any) => h.device_id === 'esp32-offline-01');
+    expect(found.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('POST /api/telemetry/batch con objeto contenedor { device_id, samples } procesa correctamente', async () => {
+    const t0 = Date.now() - 60000;
+    const containerPayload = {
+      device_id: 'esp32-container-device',
+      samples: [
+        {
+          timestamp: t0,
+          ppm: 435,
+          co_ppm: 1.8,
+          temperature: 24.0,
+          humidity: 50.0,
+          raw_adc: 652,
+        },
+        {
+          timestamp: t0 + 30000,
+          ppm: 440,
+          co_ppm: 1.9,
+          temperature: 24.1,
+          humidity: 50.2,
+          raw_adc: 660,
+        },
+      ],
+    };
+
+    const res = await fetch(`${BASE_URL}/api/telemetry/batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(containerPayload),
+    });
+
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as any;
+    expect(json.success).toBe(true);
+    expect(json.data.total_processed).toBe(2);
+    expect(json.data.samples[0].device_id).toBe('esp32-container-device');
+  });
+
+  it('POST /api/telemetry/batch con datos corruptos retorna 400 y formato estándar de error', async () => {
+    const invalidBatch = [
+      {
+        device_id: 'bad-device',
+        timestamp: -999,
+        ppm: 99999,
+      },
+    ];
+
+    const res = await fetch(`${BASE_URL}/api/telemetry/batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(invalidBatch),
+    });
+
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as any;
+    expect(json.success).toBe(false);
+    expect(json.data).toBe(null);
+    expect(json.error).toBeDefined();
+  });
+
+  it('Verifica sembrado por defecto de ubicaciones ("donde estuvimos") y mapa táctico', async () => {
+    // 1. Obtener sesiones
+    const resSessions = await fetch(`${BASE_URL}/api/sessions`);
+    expect(resSessions.status).toBe(200);
+    const jsonSessions = (await resSessions.json()) as any;
+    expect(jsonSessions.success).toBe(true);
+    expect(Array.isArray(jsonSessions.data)).toBe(true);
+
+    const names = jsonSessions.data.map((s: any) => s.name);
+    expect(names.some((n: string) => n.includes('Universidad'))).toBe(true);
+    expect(names.some((n: string) => n.includes('Parque Central'))).toBe(true);
+    expect(names.some((n: string) => n.includes('Laboratorio'))).toBe(true);
+    expect(names.some((n: string) => n.includes('Hogar'))).toBe(true);
+
+    // 2. Heatmap táctico devuelve puntos con muestras
+    const resHeatmap = await fetch(`${BASE_URL}/api/heatmap`);
+    expect(resHeatmap.status).toBe(200);
+    const jsonHeatmap = (await resHeatmap.json()) as any;
+    expect(jsonHeatmap.success).toBe(true);
+    expect(jsonHeatmap.data.length).toBeGreaterThanOrEqual(4);
+    for (const pt of jsonHeatmap.data) {
+      expect(pt.sample_count).toBeGreaterThan(0);
+      expect(pt.avg_ppm).toBeGreaterThan(0);
+    }
+  });
+
+  it('POST /api/simulate/seed y POST /api/simulate/phase controlan el modo local y estados emocionales', async () => {
+    // 1. Re-sembrar forzadamente datos quemados
+    const resSeed = await fetch(`${BASE_URL}/api/simulate/seed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: true }),
+    });
+    expect(resSeed.status).toBe(200);
+    const jsonSeed = (await resSeed.json()) as any;
+    expect(jsonSeed.success).toBe(true);
+    expect(jsonSeed.data.seeded).toBe(true);
+
+    // 2. Forzar fase CRITICAL (mascota en alerta máxima)
+    const resCritPhase = await fetch(`${BASE_URL}/api/simulate/phase`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phase: 'CRITICAL' }),
+    });
+    expect(resCritPhase.status).toBe(200);
+    const jsonCritPhase = (await resCritPhase.json()) as any;
+    expect(jsonCritPhase.success).toBe(true);
+    expect(jsonCritPhase.data.current_phase).toBe('CRITICAL');
+
+    // 3. Consultar estado detallado del simulador
+    const resDetail = await fetch(`${BASE_URL}/api/simulate/status?detailed=true`);
+    expect(resDetail.status).toBe(200);
+    const jsonDetail = (await resDetail.json()) as any;
+    expect(jsonDetail.success).toBe(true);
+    expect(jsonDetail.data.current_phase).toBe('CRITICAL');
+    expect(jsonDetail.data.manual_override).toBe('CRITICAL');
+
+    // 4. Restaurar a ciclo automático (phase: null)
+    const resAutoPhase = await fetch(`${BASE_URL}/api/simulate/phase`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phase: null }),
+    });
+    expect(resAutoPhase.status).toBe(200);
+    const jsonAutoPhase = (await resAutoPhase.json()) as any;
+    expect(jsonAutoPhase.success).toBe(true);
+    expect(jsonAutoPhase.data.manual_override).toBe(false);
+  });
+
+  it('WebSocket procesa mensaje de lote airguardian/telemetry/batch y retorna ACK', async () => {
+    const ws = new WebSocket(`ws://localhost:${PORT}`);
+
+    const connectedPromise = new Promise<void>((resolve) => {
+      ws.on('message', (data) => {
+        const parsed = JSON.parse(data.toString());
+        if (parsed.type === 'CONNECTION_ACK') {
+          resolve();
+        }
+      });
+    });
+
+    await connectedPromise;
+
+    const ackPromise = new Promise<any>((resolve) => {
+      ws.on('message', (data) => {
+        const parsed = JSON.parse(data.toString());
+        if (parsed.type === 'TELEMETRY_BATCH_ACK') {
+          resolve(parsed);
+        }
+      });
+    });
+
+    const wsBatchMsg = {
+      type: 'TELEMETRY_BATCH',
+      topic: 'airguardian/telemetry/batch',
+      payload: [
+        {
+          device_id: 'ws-esp32-batch',
+          timestamp: Date.now() - 10000,
+          ppm: 430,
+          co_ppm: 1.2,
+          temperature: 24.0,
+          humidity: 50.0,
+          delta_ppm: 0,
+          raw_adc: 645,
+        },
+        {
+          device_id: 'ws-esp32-batch',
+          timestamp: Date.now() - 5000,
+          ppm: 440,
+          co_ppm: 1.3,
+          temperature: 24.1,
+          humidity: 50.5,
+          delta_ppm: 5,
+          raw_adc: 660,
+        },
+      ],
+    };
+
+    ws.send(JSON.stringify(wsBatchMsg));
+
+    const ack = await ackPromise;
+    expect(ack.type).toBe('TELEMETRY_BATCH_ACK');
+    expect(ack.success).toBe(true);
+    expect(ack.count).toBe(2);
+
+    try { ws.terminate(); } catch (_) {}
+  });
+
+  it('GET /api/analytics/numerical-analysis calcula EDO y métodos numéricos Euler vs RK4', async () => {
+    const res = await fetch(`${BASE_URL}/api/analytics/numerical-analysis?c0=400&c_inf=1200&k=0.1&duration=20&h=1.0`);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.success).toBe(true);
+    expect(json.data.formulation).toBeDefined();
+    expect(json.data.formulation.ode_latex).toContain('dC(t)');
+    expect(json.data.formulation.analytical_solution_latex).toContain('e^{-kt}');
+    expect(json.data.metrics.euler).toBeDefined();
+    expect(json.data.metrics.rk4).toBeDefined();
+    expect(json.data.metrics.rk4.rmse).toBeLessThan(json.data.metrics.euler.rmse); // RK4 debe ser más preciso
+    expect(json.data.steps.length).toBeGreaterThan(15);
+    expect(json.data.latex_table_snippet).toContain('\\begin{table}');
+  });
+
+  it('POST /api/telemetry/command encola comando y POST /api/telemetry/ingest lo consume', async () => {
+    const targetDevice = 'air-guardian-sync-test';
+
+    // 1. Encolar comando vía POST /api/telemetry/command
+    const cmdRes = await fetch(`${BASE_URL}/api/telemetry/command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        device_id: targetDevice,
+        view_mode: 'HUD',
+        emotion: 'WARNING_PREDICTIVE',
+      }),
+    });
+    expect(cmdRes.status).toBe(200);
+    const cmdJson = (await cmdRes.json()) as any;
+    expect(cmdJson.success).toBe(true);
+    expect(cmdJson.data.view_mode).toBe('HUD');
+    expect(cmdJson.data.emotion).toBe('WARNING_PREDICTIVE');
+
+    // 2. El dispositivo hace ingest: debe recibir el comando pendiente
+    const ingestRes1 = await fetch(`${BASE_URL}/api/telemetry/ingest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        device_id: targetDevice,
+        timestamp: Date.now(),
+        ppm: 430,
+        co_ppm: 2.0,
+        temperature: 24,
+        humidity: 50,
+        delta_ppm: 0,
+        raw_adc: 600,
+        emotion: 'OPTIMAL',
+        view_mode: 'FACE',
+      }),
+    });
+    expect(ingestRes1.status).toBe(201);
+    const ingestJson1 = (await ingestRes1.json()) as any;
+    expect(ingestJson1.success).toBe(true);
+    expect(ingestJson1.data.view_mode).toBe('FACE');
+    expect(ingestJson1.data.device_emotion).toBe('OPTIMAL');
+    expect(ingestJson1.command_view_mode).toBe('HUD');
+    expect(ingestJson1.command_emotion).toBe('WARNING_PREDICTIVE');
+
+    // 3. Segundo ingest inmediato: el comando ya fue consumido y debe ser undefined
+    const ingestRes2 = await fetch(`${BASE_URL}/api/telemetry/ingest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        device_id: targetDevice,
+        timestamp: Date.now() + 1000,
+        ppm: 432,
+        co_ppm: 2.0,
+        temperature: 24,
+        humidity: 50,
+        delta_ppm: 0,
+        raw_adc: 600,
+      }),
+    });
+    expect(ingestRes2.status).toBe(201);
+    const ingestJson2 = (await ingestRes2.json()) as any;
+    expect(ingestJson2.command_view_mode).toBeUndefined();
+    expect(ingestJson2.command_emotion).toBeUndefined();
+  });
+
+  it('POST /api/telemetry/command y POST /api/telemetry/ingest emiten actualizaciones vía WebSocket', async () => {
+    const ws = new WebSocket(`ws://localhost:${PORT}`);
+    await new Promise<void>((resolve) => {
+      ws.on('open', () => resolve());
+    });
+
+    const receivedPayloads: any[] = [];
+    ws.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === 'TELEMETRY_UPDATE') {
+        receivedPayloads.push(msg.payload);
+      }
+    });
+
+    // 1. Emitir comando
+    await fetch(`${BASE_URL}/api/telemetry/command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        device_id: 'ws-command-device',
+        view_mode: 'HUD',
+        emotion: 'CRITICAL',
+      }),
+    });
+
+    // Esperar unos ms para el WS
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(receivedPayloads.length).toBeGreaterThan(0);
+    const lastCmd = receivedPayloads[receivedPayloads.length - 1];
+    expect(lastCmd.view_mode).toBe('HUD');
+    expect(lastCmd.device_emotion).toBe('CRITICAL');
+
+    // 2. Ingest con emotion y view_mode
+    await fetch(`${BASE_URL}/api/telemetry/ingest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        device_id: 'ws-command-device',
+        timestamp: Date.now(),
+        ppm: 450,
+        co_ppm: 1.0,
+        temperature: 23,
+        humidity: 45,
+        delta_ppm: 2,
+        raw_adc: 610,
+        emotion: 'RECOVERY',
+        view_mode: 'FACE',
+      }),
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    const lastIngest = receivedPayloads[receivedPayloads.length - 1];
+    expect(lastIngest.view_mode).toBe('FACE');
+    expect(lastIngest.device_emotion).toBe('RECOVERY');
+
+    try { ws.terminate(); } catch (_) {}
+  });
+
+  it('processAndBroadcast propaga los campos de hardware/diagnóstico (raw_adc7, mpu_connected, eye_x, eye_y, free_heap, uptime_s, offline_pending) por WebSocket', async () => {
+    const ws = new WebSocket(`ws://localhost:${PORT}`);
+    await new Promise<void>((resolve) => {
+      ws.on('open', () => resolve());
+    });
+
+    const receivedPayloads: any[] = [];
+    ws.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === 'TELEMETRY_UPDATE' && msg.payload?.device_id === 'ws-hardware-diag-device') {
+        receivedPayloads.push(msg.payload);
+      }
+    });
+
+    const diagSample = {
+      device_id: 'ws-hardware-diag-device',
+      timestamp: Date.now(),
+      ppm: 475,
+      co_ppm: 1.8,
+      temperature: 24.5,
+      humidity: 50.0,
+      delta_ppm: 3,
+      raw_adc: 640,
+      raw_adc7: 820,
+      mpu_connected: true,
+      eye_x: -15,
+      eye_y: 20,
+      free_heap: 192000,
+      uptime_s: 7200,
+      offline_pending: 5,
+      emotion: 'OPTIMAL',
+      view_mode: 'HUD',
+    };
+
+    const res = await fetch(`${BASE_URL}/api/telemetry/ingest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(diagSample),
+    });
+
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as any;
+    expect(json.success).toBe(true);
+    expect(json.data.raw_adc7).toBe(820);
+    expect(json.data.mpu_connected).toBe(true);
+    expect(json.data.eye_x).toBe(-15);
+    expect(json.data.eye_y).toBe(20);
+    expect(json.data.free_heap).toBe(192000);
+    expect(json.data.uptime_s).toBe(7200);
+    expect(json.data.offline_pending).toBe(5);
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(receivedPayloads.length).toBeGreaterThan(0);
+    const broadcasted = receivedPayloads[receivedPayloads.length - 1];
+    expect(broadcasted.raw_adc7).toBe(820);
+    expect(broadcasted.mpu_connected).toBe(true);
+    expect(broadcasted.eye_x).toBe(-15);
+    expect(broadcasted.eye_y).toBe(20);
+    expect(broadcasted.free_heap).toBe(192000);
+    expect(broadcasted.uptime_s).toBe(7200);
+    expect(broadcasted.offline_pending).toBe(5);
+
+    try { ws.terminate(); } catch (_) {}
   });
 });

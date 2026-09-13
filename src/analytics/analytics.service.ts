@@ -8,6 +8,10 @@ import type {
   ExportDataLakeResult,
   DataLakeLayer,
   ExportFormat,
+  NumericalAnalysisQueryDto,
+  DifferentialEquationResult,
+  NumericalStep,
+  NumericalMethodSummary,
 } from './dto/analytics.dto';
 
 interface TelemetryPoint {
@@ -754,5 +758,157 @@ export class AnalyticsService {
     );
 
     return [headerLine, ...lines].join('\r\n');
+  }
+
+  /**
+   * 4. MÓDULO ACADÉMICO: Ecuaciones Diferenciales Ordinarias (EDO) & Análisis Numérico
+   * Resuelve el modelo físico de balance de masas:
+   *   dC/dt = k*(C_inf - C(t))  donde  k = Q/V
+   * Compara:
+   *   - Solución Analítica Exacta: C(t) = C_inf + (C0 - C_inf)*exp(-k*t)
+   *   - Método de Euler Hacia Adelante (Orden 1, O(h))
+   *   - Método de Runge-Kutta 4to Orden (Orden 4, O(h^4))
+   * Genera tabla de iteraciones, análisis de errores (Abs, Rel, ERP, RMSE) y snippet LaTeX.
+   */
+  calculateDifferentialEquationsAndNumericalAnalysis(
+    query?: Partial<NumericalAnalysisQueryDto>,
+  ): DifferentialEquationResult {
+    const c0 = query?.c0 ?? 420;
+    const cInf = query?.c_inf ?? 1100;
+    const k = query?.k ?? 0.08;
+    const duration = query?.duration ?? 30;
+    const h = query?.h ?? 1.0;
+
+    // Función derivada f(t, C) = k * (C_inf - C)
+    const f = (_t: number, c: number) => k * (cInf - c);
+
+    // Solución Analítica Exacta
+    const exactSolution = (t: number) => cInf + (c0 - cInf) * Math.exp(-k * t);
+
+    const steps: NumericalStep[] = [];
+    const totalSteps = Math.min(300, Math.max(2, Math.floor(duration / h)));
+
+    let curEuler = c0;
+    let curRk4 = c0;
+
+    const eulerDiffs: number[] = [];
+    const rk4Diffs: number[] = [];
+
+    for (let i = 0; i <= totalSteps; i++) {
+      const t = Number((i * h).toFixed(4));
+      const exact = Number(exactSolution(t).toFixed(2));
+
+      // Métricas de error en este paso
+      const errAbsEuler = Number(Math.abs(exact - curEuler).toFixed(3));
+      const errRelEulerPct = Number(((errAbsEuler / Math.max(1, exact)) * 100).toFixed(3));
+
+      const errAbsRk4 = Number(Math.abs(exact - curRk4).toFixed(4));
+      const errRelRk4Pct = Number(((errAbsRk4 / Math.max(1, exact)) * 100).toFixed(4));
+
+      eulerDiffs.push(errAbsEuler);
+      rk4Diffs.push(errAbsRk4);
+
+      steps.push({
+        n: i,
+        t,
+        exact,
+        euler: Number(curEuler.toFixed(2)),
+        rk4: Number(curRk4.toFixed(2)),
+        error_abs_euler: errAbsEuler,
+        error_rel_euler_pct: errRelEulerPct,
+        error_abs_rk4: errAbsRk4,
+        error_rel_rk4_pct: errRelRk4Pct,
+      });
+
+      // Siguiente paso numérico (Euler)
+      curEuler = curEuler + h * f(t, curEuler);
+
+      // Siguiente paso numérico (RK4)
+      const k1 = f(t, curRk4);
+      const k2 = f(t + h / 2.0, curRk4 + (h / 2.0) * k1);
+      const k3 = f(t + h / 2.0, curRk4 + (h / 2.0) * k2);
+      const k4 = f(t + h, curRk4 + h * k3);
+      curRk4 = curRk4 + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
+    }
+
+    // Cálculo de métricas globales
+    const calcSummary = (diffs: number[]): NumericalMethodSummary => {
+      const n = diffs.length;
+      const mae = Number((diffs.reduce((a, b) => a + b, 0) / n).toFixed(3));
+      const rmse = Number(Math.sqrt(diffs.reduce((a, b) => a + b * b, 0) / n).toFixed(3));
+      const maxErr = Number(Math.max(...diffs).toFixed(3));
+      const meanRel = Number((steps.reduce((acc, s) => acc + s.error_rel_euler_pct, 0) / n).toFixed(3));
+      return { mae, rmse, max_error: maxErr, mean_rel_error_pct: meanRel };
+    };
+
+    const summaryEuler = calcSummary(eulerDiffs);
+    const summaryRk4: NumericalMethodSummary = {
+      mae: Number((rk4Diffs.reduce((a, b) => a + b, 0) / rk4Diffs.length).toFixed(4)),
+      rmse: Number(Math.sqrt(rk4Diffs.reduce((a, b) => a + b * b, 0) / rk4Diffs.length).toFixed(4)),
+      max_error: Number(Math.max(...rk4Diffs).toFixed(4)),
+      mean_rel_error_pct: Number((steps.reduce((acc, s) => acc + s.error_rel_rk4_pct, 0) / steps.length).toFixed(4)),
+    };
+
+    // Factor de mejora de precisión RK4 sobre Euler
+    const boostFactor = summaryRk4.rmse > 0 
+      ? Number((summaryEuler.rmse / summaryRk4.rmse).toFixed(1))
+      : 999.0;
+
+    // Análisis de estabilidad (Lipschitz & cota de paso crítico)
+    const criticalStep = Number((2.0 / k).toFixed(2));
+    const isEulerStable = h < criticalStep;
+    const stabilityMsg = isEulerStable
+      ? `Paso h=${h} min es estable (h < 2/k = ${criticalStep} min). Método de Euler converge.`
+      : `¡ADVERTENCIA DE ESTABILIDAD! Paso h=${h} min supera el límite crítico h_crit = ${criticalStep} min. Euler puede presentar oscilaciones numéricas artificiales o divergencia.`;
+
+    // Generar snippet LaTeX para informe académico
+    const sampleRows = steps.slice(0, 8);
+    const latexRows = sampleRows
+      .map(
+        (s) =>
+          `  ${s.n} & ${s.t.toFixed(1)} & ${s.exact.toFixed(1)} & ${s.euler.toFixed(1)} & ${s.rk4.toFixed(1)} & ${s.error_abs_euler.toFixed(2)} & ${s.error_abs_rk4.toFixed(4)} \\\\`,
+      )
+      .join('\n');
+
+    const latexTable = `\\begin{table}[h!]
+\\centering
+\\caption{Comparativa Numérica: Solución Analítica vs Euler vs RK4 ($h = ${h}$ min)}
+\\begin{tabular}{|c|c|c|c|c|c|c|}
+\\hline
+$n$ & $t_n$ (min) & $C_{\\text{exact}}$ & $C_{\\text{Euler}}$ & $C_{\\text{RK4}}$ & $E_{\\text{abs,Euler}}$ & $E_{\\text{abs,RK4}}$ \\\\
+\\hline
+${latexRows}
+\\hline
+\\end{tabular}
+\\label{tab:analisis_numerico_air_guardian}
+\\end{table}`;
+
+    return {
+      formulation: {
+        ode_latex: 'V \\frac{dC(t)}{dt} = G - Q C(t) \\implies \\frac{dC}{dt} = k(C_\\infty - C)',
+        integrating_factor_latex: '\\mu(t) = e^{\\int k dt} = e^{kt}',
+        analytical_solution_latex: 'C(t) = C_\\infty + (C_0 - C_\\infty)e^{-kt}',
+        physical_variables: {
+          c0,
+          c_inf: cInf,
+          k,
+          h,
+          duration_minutes: duration,
+        },
+        stability_analysis: {
+          critical_step_h: criticalStep,
+          is_euler_stable: isEulerStable,
+          lipschitz_constant: k,
+          stability_message: stabilityMsg,
+        },
+      },
+      metrics: {
+        euler: summaryEuler,
+        rk4: summaryRk4,
+        rk4_accuracy_boost_factor: boostFactor,
+      },
+      steps,
+      latex_table_snippet: latexTable,
+    };
   }
 }

@@ -5,7 +5,7 @@ import {
   OnGatewayDisconnect,
   OnGatewayInit,
 } from '@nestjs/websockets';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleDestroy } from '@nestjs/common';
 import type { Server } from 'ws';
 import { WebSocket } from 'ws';
 
@@ -15,14 +15,19 @@ interface ExtendedWebSocket extends WebSocket {
 
 @WebSocketGateway({ path: '/' })
 export class TelemetryGateway
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
 {
   private readonly logger = new Logger(TelemetryGateway.name);
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private readonly clients = new Set<ExtendedWebSocket>();
+  private batchHandler?: (samples: any[]) => any;
 
   @WebSocketServer()
   server!: Server;
+
+  setBatchHandler(handler: (samples: any[]) => any) {
+    this.batchHandler = handler;
+  }
 
   afterInit() {
     this.logger.log('📡 WebSocket Telemetry Gateway inicializado.');
@@ -35,6 +40,31 @@ export class TelemetryGateway
 
     client.on('pong', () => {
       client.isAlive = true;
+    });
+
+    client.on('message', async (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        const isBatch =
+          msg.type === 'TELEMETRY_BATCH' ||
+          msg.topic === 'airguardian/telemetry/batch' ||
+          msg.event === 'airguardian/telemetry/batch';
+
+        if (isBatch && this.batchHandler) {
+          const samples = msg.payload || msg.samples || msg.data || msg.items;
+          if (Array.isArray(samples) && samples.length > 0) {
+            const res = await this.batchHandler(samples);
+            client.send(
+              JSON.stringify({
+                type: 'TELEMETRY_BATCH_ACK',
+                topic: 'airguardian/telemetry/batch/ack',
+                success: true,
+                count: res?.total_processed ?? samples.length,
+              }),
+            );
+          }
+        }
+      } catch (_) {}
     });
 
     client.on('error', (err) => {
@@ -84,6 +114,32 @@ export class TelemetryGateway
     }
   }
 
+  broadcastBatch(payload: any[]) {
+    const msg = JSON.stringify({
+      type: 'TELEMETRY_BATCH',
+      topic: 'airguardian/telemetry/batch',
+      payload,
+    });
+
+    for (const client of this.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(msg);
+        } catch (err) {
+          this.clients.delete(client);
+          try {
+            client.terminate();
+          } catch (_) {}
+        }
+      } else if (
+        client.readyState === WebSocket.CLOSED ||
+        client.readyState === WebSocket.CLOSING
+      ) {
+        this.clients.delete(client);
+      }
+    }
+  }
+
   private startHeartbeat() {
     this.heartbeatInterval = setInterval(() => {
       for (const ws of this.clients) {
@@ -102,6 +158,7 @@ export class TelemetryGateway
         }
       }
     }, 30000);
+    this.heartbeatInterval.unref?.();
   }
 
   onModuleDestroy() {

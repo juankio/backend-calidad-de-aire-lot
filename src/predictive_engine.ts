@@ -37,14 +37,14 @@ export class PredictiveEngine {
 
     const sessionId = activeSession ? activeSession.id : null;
 
-    // 3. Obtener últimas 10 muestras (ventana deslizante) para calcular inercia y derivada temporal
+    // 3. Obtener últimas 10 muestras (ventana deslizante) hasta el timestamp actual
     const recentRows = db
       .query(
         `SELECT ppm, timestamp FROM bronze_telemetry 
-         WHERE device_id = ? 
+         WHERE device_id = ? AND timestamp <= ?
          ORDER BY timestamp DESC LIMIT 10`,
       )
-      .all(data.device_id) as Array<{ ppm: number; timestamp: number }>;
+      .all(data.device_id, data.timestamp) as Array<{ ppm: number; timestamp: number }>;
 
     let delta1m = data.delta_ppm;
     if (recentRows.length >= 2) {

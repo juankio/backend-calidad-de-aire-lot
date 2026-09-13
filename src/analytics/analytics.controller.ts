@@ -12,8 +12,10 @@ import { AnalyticsService } from './analytics.service';
 import {
   DataLakeLayerSchema,
   ExportFormatSchema,
+  NumericalAnalysisQuerySchema,
   type DataLakeLayer,
   type ExportFormat,
+  type NumericalAnalysisQueryDto,
 } from './dto/analytics.dto';
 
 @Controller('analytics')
@@ -44,6 +46,23 @@ export class AnalyticsController {
     return {
       data: matrix,
       message: 'Matriz de correlación de Pearson calculada con éxito',
+    };
+  }
+
+  /**
+   * GET /api/analytics/numerical-analysis
+   * Módulo Académico: Deducción de EDO (balance de masas), Solución Analítica Exacta,
+   * Método de Euler vs Runge-Kutta 4to Orden (RK4) y Análisis Formal de Errores.
+   * Query params: ?c0=420&c_inf=1100&k=0.08&duration=30&h=1.0
+   */
+  @Get('numerical-analysis')
+  getNumericalAnalysis(@Query() rawQuery: any) {
+    const parse = NumericalAnalysisQuerySchema.safeParse(rawQuery);
+    const query = parse.success ? parse.data : undefined;
+    const result = this.analyticsService.calculateDifferentialEquationsAndNumericalAnalysis(query);
+    return {
+      data: result,
+      message: 'Análisis numérico y solución analítica de EDO calculados con éxito',
     };
   }
 

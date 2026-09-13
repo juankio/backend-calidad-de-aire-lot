@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { initializeDatabase, db } from "./database";
 import {
   TelemetryIngestSchema,
+  TelemetryBatchSchema,
   CreateSessionSchema,
   QueryHistorySchema
 } from "./schemas";
@@ -70,7 +71,14 @@ app.post("/api/telemetry/ingest", (req: Request, res: Response) => {
       risk_status: prediction.risk_status,
       session_id: prediction.session_id,
       timestamp_iso: new Date(data.timestamp).toISOString(),
-      source: "hardware"
+      source: "hardware",
+      raw_adc7: data.raw_adc7,
+      mpu_connected: data.mpu_connected,
+      eye_x: data.eye_x,
+      eye_y: data.eye_y,
+      free_heap: data.free_heap,
+      uptime_s: data.uptime_s,
+      offline_pending: data.offline_pending,
     };
 
     broadcastTelemetry({ type: "TELEMETRY_UPDATE", payload: broadcastData });
@@ -79,6 +87,69 @@ app.post("/api/telemetry/ingest", (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("[CSO Audit Exception] Error en ingesta:", error);
     return res.status(500).json(formatResponse(false, null, "Fallo interno al procesar telemetría", error?.message || "Internal error"));
+  }
+});
+
+// 1b. Ingesta por Lotes / Offline Flush (ESP32 Reconexión)
+app.post("/api/telemetry/batch", (req: Request, res: Response) => {
+  try {
+    const parseResult = TelemetryBatchSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json(formatResponse(false, null, "Lote de telemetría inválido", parseResult.error.format()));
+    }
+
+    const samples = parseResult.data;
+    const sorted = [...samples].sort((a, b) => a.timestamp - b.timestamp);
+    const enrichedList: any[] = [];
+
+    const insertTx = db.transaction(() => {
+      for (const sample of sorted) {
+        const prediction = PredictiveEngine.processTelemetry(sample);
+        enrichedList.push({
+          ...sample,
+          predicted_ppm_15m: prediction.predicted_ppm_15m,
+          delta_ppm_1m: prediction.delta_ppm_1m,
+          risk_status: prediction.risk_status,
+          session_id: prediction.session_id,
+          timestamp_iso: new Date(sample.timestamp).toISOString(),
+          source: "hardware",
+          raw_adc7: sample.raw_adc7,
+          mpu_connected: sample.mpu_connected,
+          eye_x: sample.eye_x,
+          eye_y: sample.eye_y,
+          free_heap: sample.free_heap,
+          uptime_s: sample.uptime_s,
+          offline_pending: sample.offline_pending,
+        });
+      }
+    });
+
+    insertTx();
+
+    broadcastTelemetry({
+      type: "TELEMETRY_BATCH",
+      topic: "airguardian/telemetry/batch",
+      payload: enrichedList
+    });
+
+    if (enrichedList.length > 0) {
+      broadcastTelemetry({
+        type: "TELEMETRY_UPDATE",
+        payload: enrichedList[enrichedList.length - 1]
+      });
+    }
+
+    return res.status(201).json(formatResponse(true, {
+      total_received: samples.length,
+      total_processed: enrichedList.length,
+      first_timestamp: enrichedList.length ? enrichedList[0].timestamp : null,
+      last_timestamp: enrichedList.length ? enrichedList[enrichedList.length - 1].timestamp : null,
+      device_id: sorted[0]?.device_id || "air-guardian-01",
+      samples: enrichedList
+    }, `Lote de telemetría (${enrichedList.length} muestras) procesado y persistido correctamente`));
+  } catch (error: any) {
+    console.error("[CSO Audit Exception] Error en batch:", error);
+    return res.status(500).json(formatResponse(false, null, "Fallo interno al procesar lote", error?.message || "Internal error"));
   }
 });
 
