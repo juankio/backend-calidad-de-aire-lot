@@ -25,6 +25,8 @@ export const TelemetryIngestSchema = z.object({
   ay: z.number().optional(),
   az: z.number().optional(),
   is_shaking: z.boolean().optional(),
+  shake_energy: z.number().optional(),
+  baby_rock_score: z.number().optional(),
   free_heap: z.number().optional(),
   uptime_s: z.number().optional(),
   offline_pending: z.number().optional(),
