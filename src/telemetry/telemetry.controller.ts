@@ -24,6 +24,15 @@ import {
 export class TelemetryController {
   constructor(private readonly telemetryService: TelemetryService) {}
 
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  ingestTelemetryRoot(
+    @Body(new ZodValidationPipe(TelemetryIngestSchema))
+    data: TelemetryIngestDto,
+  ) {
+    return this.ingestTelemetry(data);
+  }
+
   @Post('ingest')
   @HttpCode(HttpStatus.CREATED)
   ingestTelemetry(

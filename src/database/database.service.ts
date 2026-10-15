@@ -1,5 +1,7 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { Database } from 'bun:sqlite';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -12,8 +14,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   private initDatabase() {
-    this.logger.log('🔥 Inicializando Data Lake SQLite con arquitectura Medallion...');
-    this.db = new Database('air_guardian_datalake.sqlite');
+    const dbPath = process.env.DATABASE_PATH || 'air_guardian_datalake.sqlite';
+    const dbDir = path.dirname(dbPath);
+    if (dbDir && dbDir !== '.' && !fs.existsSync(dbDir)) {
+      fs.mkdirSync(dbDir, { recursive: true });
+    }
+
+    this.logger.log(`🔥 Inicializando Data Lake SQLite en "${dbPath}" con arquitectura Medallion...`);
+    this.db = new Database(dbPath);
 
     // 1. Activar WAL (Write-Ahead Logging) para máxima concurrencia y velocidad
     this.db.run('PRAGMA journal_mode = WAL;');

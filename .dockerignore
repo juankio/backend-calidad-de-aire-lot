@@ -1,0 +1,28 @@
+node_modules/
+dist/
+out/
+.git/
+.github/
+.vscode/
+.idea/
+
+# SQLite local para garantizar persistencia limpia en volumen
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Variables de entorno locales
+.env
+.env.local
+.env.development
+
+# Logs y pruebas
+logs/
+*.log
+coverage/
+*.lcov
+bun.lockb
+report.*.json

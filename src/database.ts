@@ -1,6 +1,14 @@
 import { Database } from 'bun:sqlite';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
-const db = new Database('air_guardian_datalake.sqlite');
+const dbPath = process.env.DATABASE_PATH || 'air_guardian_datalake.sqlite';
+const dbDir = path.dirname(dbPath);
+if (dbDir && dbDir !== '.' && !fs.existsSync(dbDir)) {
+  fs.mkdirSync(dbDir, { recursive: true });
+}
+
+const db = new Database(dbPath);
 
 db.run('PRAGMA journal_mode = WAL;');
 db.run('PRAGMA synchronous = NORMAL;');
