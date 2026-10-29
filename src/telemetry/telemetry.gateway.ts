@@ -82,6 +82,9 @@ export class TelemetryGateway
     } catch (err) {
       this.logger.error('Error enviando CONNECTION_ACK al cliente', err);
       this.clients.delete(client);
+      try {
+        client.terminate();
+      } catch (_) {}
     }
   }
 
@@ -89,7 +92,7 @@ export class TelemetryGateway
     this.clients.delete(client);
   }
 
-  broadcastTelemetry(payload: any) {
+  broadcastTelemetry(payload: unknown) {
     const msg = JSON.stringify({
       type: 'TELEMETRY_UPDATE',
       payload,
@@ -114,10 +117,35 @@ export class TelemetryGateway
     }
   }
 
-  broadcastBatch(payload: any[]) {
+  broadcastBatch(payload: unknown[]) {
     const msg = JSON.stringify({
       type: 'TELEMETRY_BATCH',
       topic: 'airguardian/telemetry/batch',
+      payload,
+    });
+
+    for (const client of this.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(msg);
+        } catch (err) {
+          this.clients.delete(client);
+          try {
+            client.terminate();
+          } catch (_) {}
+        }
+      } else if (
+        client.readyState === WebSocket.CLOSED ||
+        client.readyState === WebSocket.CLOSING
+      ) {
+        this.clients.delete(client);
+      }
+    }
+  }
+
+  broadcastMotion(payload: unknown) {
+    const msg = JSON.stringify({
+      type: 'MOTION_UPDATE',
       payload,
     });
 

@@ -15,6 +15,10 @@ export class TelemetryService {
   private readonly logger = new Logger(TelemetryService.name);
   private pendingCommands: Record<string, { view_mode?: 'FACE' | 'HUD'; emotion?: string; timestamp: number }> = {};
   private latestLivePayload: EnrichedTelemetryPayload | null = null;
+  private commandEmitter?: (
+    deviceId: string,
+    command: { view_mode?: 'FACE' | 'HUD'; emotion?: string },
+  ) => void;
 
   constructor(
     private readonly telemetryRepository: TelemetryRepository,
@@ -24,6 +28,19 @@ export class TelemetryService {
     this.telemetryGateway.setBatchHandler((samples) =>
       this.processTelemetryBatch(samples, 'hardware'),
     );
+  }
+
+  /**
+   * Registra el canal de salida de comandos hacia el nodo físico.
+   * En enlace local por cable el comando viaja por la misma línea serie.
+   */
+  setCommandEmitter(
+    emitter: (
+      deviceId: string,
+      command: { view_mode?: 'FACE' | 'HUD'; emotion?: string },
+    ) => void,
+  ) {
+    this.commandEmitter = emitter;
   }
 
   /**
@@ -37,6 +54,7 @@ export class TelemetryService {
       timestamp: Date.now(),
     };
     this.logger.log(`⚡ Comando encolado para [${deviceId}]: ${JSON.stringify(command)}`);
+    this.commandEmitter?.(deviceId, command);
     return this.pendingCommands[deviceId];
   }
 
